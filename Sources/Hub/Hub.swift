@@ -6,7 +6,6 @@
 //
 
 import Foundation
-
 public struct Hub {}
 
 public extension Hub {
@@ -112,6 +111,7 @@ public class LanguageModelConfigurationFromHub {
     public init(modelName: String) {
         self.configPromise = Task.init {
             return try await self.loadConfig(modelName: modelName)
+//            return try self.loadConfigFromLocal(modelName: modelName)
         }
     }
 
@@ -149,21 +149,78 @@ public class LanguageModelConfigurationFromHub {
             try await modelConfig.modelType?.stringValue
         }
     }
+    
+    //MARK: 这里是我自己加入的代码
+    enum ConfigurationLoadingError: Error {
+        case directoryNotFound
+        case fileNotFound
+        case invalidData
+    }
 
+    private func jsonFileURL(resource: String, directory: String) -> URL? {
+        guard let fileURL = Bundle.main.url(forResource: resource, withExtension: "json", subdirectory: directory) else {
+            return nil // 文件不存在或路径错误
+        }
+        return fileURL
+    }
+    
+    func extractSubmodelName(from modelName: String) -> String? {
+        // 输入 "openai/whisper-tiny.en" , 将返回 "tiny"
+        let components = modelName.split(separator: "-")
+        var submodelName: String?
+        if components.count >= 2 {
+            submodelName = String(components[1].split(separator: ".")[0])
+            print(submodelName!)
+        }
+        return submodelName
+    }
+    
     func loadConfig(modelName: String, hfToken: String? = nil) async throws -> Configurations {
-        let hubApi = HubApi(hfToken: hfToken)
-        let filesToDownload = ["config.json", "tokenizer_config.json", "tokenizer.json"]
-        let repo = Hub.Repo(id: modelName)
-        try await hubApi.snapshot(from: repo, matching: filesToDownload)
-
-        // Note tokenizerConfig may be nil (does not exist in all models)
-        let modelConfig = try hubApi.configuration(from: "config.json", in: repo)
-        let tokenizerConfig = try? hubApi.configuration(from: "tokenizer_config.json", in: repo)
-        let tokenizerVocab = try hubApi.configuration(from: "tokenizer.json", in: repo)
         
+        guard let submodelName = extractSubmodelName(from: modelName) else {
+            throw ConfigurationLoadingError.invalidData
+        }
+        
+        let directory = "Json/" + submodelName
+        guard let modelConfigURL = jsonFileURL(resource: "config", directory: directory),
+              let tokenizerConfigURL = jsonFileURL(resource: "tokenizer_config", directory: directory),
+              let tokenizerVocabURL = jsonFileURL(resource: "tokenizer", directory: directory) else {
+            throw ConfigurationLoadingError.fileNotFound
+        }
+
+        let modelConfigData = try Data(contentsOf: modelConfigURL)
+        let tokenizerConfigData = try Data(contentsOf: tokenizerConfigURL)
+        let tokenizerVocabData = try Data(contentsOf: tokenizerVocabURL)
+
+        guard let modelConfigDictionary = try JSONSerialization.jsonObject(with: modelConfigData, options: []) as? [String: Any],
+              let tokenizerConfigDictionary = try JSONSerialization.jsonObject(with: tokenizerConfigData, options: []) as? [String: Any],
+              let tokenizerVocabDictionary = try JSONSerialization.jsonObject(with: tokenizerVocabData, options: []) as? [String: Any] else {
+            throw ConfigurationLoadingError.invalidData
+        }
+
+        let modelConfig = Config(modelConfigDictionary)
+        let tokenizerConfig = tokenizerConfigDictionary.isEmpty ? nil : Config(tokenizerConfigDictionary)
+        let tokenizerVocab = Config(tokenizerVocabDictionary)
+
         let configs = Configurations(modelConfig: modelConfig, tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerVocab)
         return configs
     }
+    
+//    func loadConfig(modelName: String, hfToken: String? = nil) async throws -> Configurations {
+//        let hubApi = HubApi(hfToken: hfToken)
+//        let filesToDownload = ["config.json", "tokenizer_config.json", "tokenizer.json"]
+//        let repo = Hub.Repo(id: modelName)
+//        print("repo is \(repo)")
+//        try await hubApi.snapshot(from: repo, matching: filesToDownload)
+//
+//        // Note tokenizerConfig may be nil (does not exist in all models)
+//        let modelConfig = try hubApi.configuration(from: "config.json", in: repo)
+//        let tokenizerConfig = try? hubApi.configuration(from: "tokenizer_config.json", in: repo)
+//        let tokenizerVocab = try hubApi.configuration(from: "tokenizer.json", in: repo)
+//        
+//        let configs = Configurations(modelConfig: modelConfig, tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerVocab)
+//        return configs
+//    }
 
     static func fallbackTokenizerConfig(for modelType: String) -> Config? {
         guard let url = Bundle.module.url(forResource: "\(modelType)_tokenizer_config", withExtension: "json") else { return nil }
